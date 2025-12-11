@@ -94,7 +94,8 @@ task bcftools_stats_roh_small_variants {
 
     # plot SNVs by REF and ALT
     cat << EOF > plot_snvs.py
-    import sys, pandas as pd, seaborn as sns, matplotlib.pyplot as plt, numpy as np
+    import sys, pandas as pd, seaborn as sns, matplotlib, matplotlib.pyplot as plt, numpy as np
+    matplotlib.use('Agg')
     BASES = ['A', 'C', 'G', 'T']
     df = pd.concat(
       [
@@ -114,7 +115,7 @@ task bcftools_stats_roh_small_variants {
     plt.yticks(fontsize='large', rotation=0)
     plt.title('~{sample_id}.~{ref_name}\nDeepVariant SNV distribution', fontsize='large')
     fig.tight_layout()
-    plt.savefig('~{sample_id}.~{ref_name}.small_variants.snv_distribution.png')
+    plt.savefig('~{sample_id}.~{ref_name}.small_variants.snv_distribution.png'); plt.close();
     EOF
 
     # normalize VCF, filtering for PASS SNVs >= GQ20, group by REF and ALT, and plot
@@ -136,7 +137,8 @@ task bcftools_stats_roh_small_variants {
 
     # plot indels by size
     cat << EOF > plot_indels.py
-    import sys, pandas as pd, seaborn as sns, matplotlib.pyplot as plt
+    import sys, pandas as pd, seaborn as sns, matplotlib, matplotlib.pyplot as plt
+    matplotlib.use('Agg')
     from numpy import abs
     df = pd.read_csv(sys.stdin, sep='\t')
     def size_filter(df, col, min, max):
@@ -158,7 +160,7 @@ task bcftools_stats_roh_small_variants {
     plot_hist(axs[1], df, 1, 50, logy=True)
     plt.suptitle('~{sample_id}.~{ref_name}\nDeepVariant indel distribution, ±[1,50) bp')
     fig.tight_layout()
-    plt.savefig('~{sample_id}.~{ref_name}.small_variants.indel_distribution.png')
+    plt.savefig('~{sample_id}.~{ref_name}.small_variants.indel_distribution.png'); plt.close();
     EOF
 
     # normalize VCF, filter for PASS indels >= GQ20, group by length, and plot
@@ -219,13 +221,14 @@ task bcftools_stats_roh_small_variants {
   runtime {
     docker: "~{runtime_attributes.container_registry}/pb_wdl_base@sha256:4b889a1f21a6a7fecf18820613cf610103966a93218de772caba126ab70a8e87"
     cpu: threads
-    memory: mem_gb + " GB"
+    memory: mem_gb + " GiB"
     disk: disk_size + " GB"
     disks: "local-disk " + disk_size + " HDD"
     preemptible: runtime_attributes.preemptible_tries
     maxRetries: runtime_attributes.max_retries
     awsBatchRetryAttempts: runtime_attributes.max_retries  # !UnknownRuntimeKey
     zones: runtime_attributes.zones
+    cpuPlatform: runtime_attributes.cpuPlatform
   }
 }
 
@@ -297,13 +300,14 @@ task concat_pbsv_vcf {
   runtime {
     docker: "~{runtime_attributes.container_registry}/pb_wdl_base@sha256:4b889a1f21a6a7fecf18820613cf610103966a93218de772caba126ab70a8e87"
     cpu: threads
-    memory: mem_gb + " GB"
+    memory: mem_gb + " GiB"
     disk: disk_size + " GB"
     disks: "local-disk " + disk_size + " HDD"
     preemptible: runtime_attributes.preemptible_tries
     maxRetries: runtime_attributes.max_retries
     awsBatchRetryAttempts: runtime_attributes.max_retries  # !UnknownRuntimeKey
     zones: runtime_attributes.zones
+    cpuPlatform: runtime_attributes.cpuPlatform
   }
 }
 
@@ -313,8 +317,8 @@ task split_vcf_by_sample {
   }
 
   parameter_meta {
-    sample_ids: {
-      name: "Sample IDs"
+    sample_id: {
+      name: "Sample ID"
     }
     vcf: {
       name: "VCF"
@@ -322,30 +326,35 @@ task split_vcf_by_sample {
     vcf_index: {
       name: "VCF index"
     }
-    split_vcf_names: {
-      name: "Split VCF names"
+    split_vcf_name: {
+      name: "Split VCF name"
     }
-    split_vcf_index_names: {
-      name: "Split VCF index names"
+    split_vcf_index_name: {
+      name: "Split VCF index name"
+    }
+    exclude_uncalled: {
+      name: "Exclude uncalled genotypes (default: true)"
     }
     runtime_attributes: {
       name: "Runtime attribute structure"
     }
-    split_vcfs: {
-      name: "Split VCFs"
+    split_vcf: {
+      name: "Split VCF"
     }
-    split_vcf_indices: {
-      name: "Split VCF indices"
+    split_vcf_index: {
+      name: "Split VCF index"
     }
   }
 
   input {
-    Array[String] sample_ids
+    String sample_id
     File vcf
     File vcf_index
 
-    Array[String] split_vcf_names
-    Array[String] split_vcf_index_names
+    String split_vcf_name
+    String split_vcf_index_name
+
+    Boolean exclude_uncalled = true
 
     RuntimeAttributes runtime_attributes
   }
@@ -361,38 +370,35 @@ task split_vcf_by_sample {
 
     bcftools --version
 
-    for sample_id in ~{sep=" " sample_ids}; do
-      # Extract sample, keeping only passing variants and excluding uncalled genotypes
-      bcftools view \
-        ~{if threads > 1 then "--threads " + (threads - 1) else ""} \
-        --samples ${sample_id} \
-        --exclude-uncalled \
-        --output-type z \
-        --output ${sample_id}.~{vcf_basename}.vcf.gz \
-        ~{vcf}
-      bcftools index --tbi \
-        ~{if threads > 1 then "--threads " + (threads - 1) else ""} \
-        ${sample_id}.~{vcf_basename}.vcf.gz
-      echo ${sample_id}.~{vcf_basename}.vcf.gz >> vcf.list
-      echo ${sample_id}.~{vcf_basename}.vcf.gz.tbi >> index.list
-    done
+    # Extract sample, optionally excluding uncalled genotypes
+    bcftools view \
+      ~{if threads > 1 then "--threads " + (threads - 1) else ""} \
+      --samples ~{sample_id} \
+      ~{true="--exclude-uncalled" false="" exclude_uncalled} \
+      --output-type z \
+      --output ~{split_vcf_name} \
+      ~{vcf}
+    bcftools index --tbi \
+      ~{if threads > 1 then "--threads " + (threads - 1) else ""} \
+      ~{split_vcf_name}
   >>>
 
   output {
-    Array[File] split_vcfs        = split_vcf_names
-    Array[File] split_vcf_indices = split_vcf_index_names
+    File split_vcf       = split_vcf_name
+    File split_vcf_index = split_vcf_index_name
   }
 
   runtime {
     docker: "~{runtime_attributes.container_registry}/pb_wdl_base@sha256:4b889a1f21a6a7fecf18820613cf610103966a93218de772caba126ab70a8e87"
     cpu: threads
-    memory: mem_gb + " GB"
+    memory: mem_gb + " GiB"
     disk: disk_size + " GB"
     disks: "local-disk " + disk_size + " HDD"
     preemptible: runtime_attributes.preemptible_tries
     maxRetries: runtime_attributes.max_retries
     awsBatchRetryAttempts: runtime_attributes.max_retries  # !UnknownRuntimeKey
     zones: runtime_attributes.zones
+    cpuPlatform: runtime_attributes.cpuPlatform
   }
 }
 
@@ -456,13 +462,14 @@ task bcftools_merge {
   runtime {
     docker: "~{runtime_attributes.container_registry}/pb_wdl_base@sha256:4b889a1f21a6a7fecf18820613cf610103966a93218de772caba126ab70a8e87"
     cpu: threads
-    memory: mem_gb + " GB"
+    memory: mem_gb + " GiB"
     disk: disk_size + " GB"
     disks: "local-disk " + disk_size + " HDD"
     preemptible: runtime_attributes.preemptible_tries
     maxRetries: runtime_attributes.max_retries
     awsBatchRetryAttempts: runtime_attributes.max_retries  # !UnknownRuntimeKey
     zones: runtime_attributes.zones
+    cpuPlatform: runtime_attributes.cpuPlatform
   }
 }
 
@@ -474,6 +481,9 @@ task sv_stats {
   parameter_meta {
     vcf: {
       name: "VCF"
+    }
+    min_length: {
+      name: "Minimum length"
     }
     runtime_attributes: {
       name: "Runtime attribute structure"
@@ -493,10 +503,16 @@ task sv_stats {
     stat_sv_BND_count: {
       name: "Number of breakends"
     }
+    stat_sv_SWAP_count: {
+      name: "Number of sequence swap variants greater than 49 bp"
+    }
   }
 
   input {
     File vcf
+
+    Int min_length = 50
+    Int max_scar_length = 10
 
     RuntimeAttributes runtime_attributes
   }
@@ -509,53 +525,61 @@ task sv_stats {
     # Count the number of variants of each type
     bcftools view \
       --no-header \
-      --include 'FILTER="PASS" & ABS(SVLEN)>49 & SVTYPE="DUP"' \
+      --include '(GT!="ref" & GT!="./." & GT!=".") & FILTER="PASS" & ABS(SVLEN)>=~{min_length} & SVTYPE="DUP"' \
       "~{vcf}" \
     | wc --lines \
     > stat_DUP.txt || echo "0" > stat_DUP.txt
     bcftools view \
       --no-header \
-      --include 'FILTER="PASS" & ABS(SVLEN)>49 & SVTYPE="DEL"' \
+      --include 'GT="alt" & FILTER="PASS" & ABS(SVLEN)>=~{min_length} & SVTYPE="DEL" & STRLEN(ALT[0])<=~{max_scar_length}' \
       "~{vcf}" \
     | wc --lines \
     > stat_DEL.txt || echo "0" > stat_DEL.txt
     bcftools view \
       --no-header \
-      --include 'FILTER="PASS" & ABS(SVLEN)>49 & SVTYPE="INS"' \
+      --include 'GT="alt" & FILTER="PASS" & ABS(SVLEN)>=~{min_length} & SVTYPE="INS" & STRLEN(REF)<=~{max_scar_length}' \
       "~{vcf}" \
     | wc --lines \
     > stat_INS.txt || echo "0" > stat_INS.txt
     bcftools view \
       --no-header \
-      --include 'FILTER="PASS" & ABS(SVLEN)>49 & SVTYPE="INV"' \
+      --include 'GT="alt" & FILTER="PASS" & ABS(SVLEN)>=~{min_length} & (SVTYPE="INS" | SVTYPE="DEL") & STRLEN(REF)>~{max_scar_length} & STRLEN(ALT[0])>~{max_scar_length}' \
+      "~{vcf}" \
+    | wc --lines \
+    > stat_SWAP.txt || echo "0" > stat_SWAP.txt
+    bcftools view \
+      --no-header \
+      --include 'GT="alt" & FILTER="PASS" & SVTYPE="INV"' \
       "~{vcf}" \
     | wc --lines \
     > stat_INV.txt || echo "0" > stat_INV.txt
     bcftools view \
       --no-header \
-      --include 'FILTER="PASS" & SVTYPE="BND"' \
+      --include 'GT="alt" & FILTER="PASS" & SVTYPE="BND"' \
       "~{vcf}" \
     | wc --lines \
     > stat_BND.txt || echo "0" > stat_BND.txt
   >>>
 
   output {
-    String stat_sv_DUP_count = read_string("stat_DUP.txt")
-    String stat_sv_DEL_count = read_string("stat_DEL.txt")
-    String stat_sv_INS_count = read_string("stat_INS.txt")
-    String stat_sv_INV_count = read_string("stat_INV.txt")
-    String stat_sv_BND_count = read_string("stat_BND.txt")
+    String stat_sv_DUP_count  = read_string("stat_DUP.txt")
+    String stat_sv_DEL_count  = read_string("stat_DEL.txt")
+    String stat_sv_INS_count  = read_string("stat_INS.txt")
+    String stat_sv_INV_count  = read_string("stat_INV.txt")
+    String stat_sv_BND_count  = read_string("stat_BND.txt")
+    String stat_sv_SWAP_count = read_string("stat_SWAP.txt")
   }
 
   runtime {
     docker: "~{runtime_attributes.container_registry}/pb_wdl_base@sha256:4b889a1f21a6a7fecf18820613cf610103966a93218de772caba126ab70a8e87"
     cpu: threads
-    memory: mem_gb + " GB"
+    memory: mem_gb + " GiB"
     disk: disk_size + " GB"
     disks: "local-disk " + disk_size + " HDD"
     preemptible: runtime_attributes.preemptible_tries
     maxRetries: runtime_attributes.max_retries
     awsBatchRetryAttempts: runtime_attributes.max_retries  # !UnknownRuntimeKey
     zones: runtime_attributes.zones
+    cpuPlatform: runtime_attributes.cpuPlatform
   }
 }
